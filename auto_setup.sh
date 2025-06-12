@@ -512,7 +512,7 @@ echo
 echo "=== Starting Setup ==="
 
 # Step 1: Configure network interfaces
-echo "Configuring network interfaces..."
+echo "[1/17] Configuring network interfaces..."
 cp /etc/network/interfaces /etc/network/interfaces.backup.$(date +%Y%m%d_%H%M%S)
 
 cat > /etc/network/interfaces << EOF
@@ -534,12 +534,12 @@ iface $LAN_INTERFACE inet static
 EOF
 
 # Step 2: Restart networking
-echo "Restarting networking..."
+echo "[2/17] Restarting networking..."
 run_cmd systemctl restart networking
 run_cmd sleep 2
 
 # Step 3: Configure dnsmasq
-echo "Configuring dnsmasq..."
+echo "[3/17] Configuring dnsmasq..."
 run_cmd cp /etc/dnsmasq.conf /etc/dnsmasq.conf.backup.$(date +%Y%m%d_%H%M%S)
 
 cat > /etc/dnsmasq.conf << EOF
@@ -569,11 +569,11 @@ log-facility=/var/log/dnsmasq.log
 EOF
 
 # Step 4: Restart dnsmasq
-echo "Restarting dnsmasq..."
+echo "[4/15] Restarting dnsmasq..."
 run_cmd systemctl restart dnsmasq
 
 # Step 5: Set nameserver and lock resolv.conf
-echo "Configuring local DNS resolution..."
+echo "[5/15] Configuring local DNS resolution..."
 run_cmd cp /etc/resolv.conf /etc/resolv.conf.backup.$(date +%Y%m%d_%H%M%S)
 run_cmd chattr -i /etc/resolv.conf 2>/dev/null || true
 echo "Running: echo 'nameserver 127.0.0.1' > /etc/resolv.conf"
@@ -581,11 +581,11 @@ echo "nameserver 127.0.0.1" > /etc/resolv.conf
 run_cmd chattr +i /etc/resolv.conf
 
 # Step 6: Configure IP forwarding
-echo "Enabling IP forwarding..."
+echo "[6/15] Enabling IP forwarding..."
 run_cmd echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
 
 # Step 7: Prepare for DNS over TCP proxy (will start in tmux)
-echo "Preparing DNS over TCP proxy..."
+echo "[7/15] Preparing DNS over TCP proxy..."
 if [ -f "./dns_over_tcp.py" ]; then
     echo "DNS over TCP script found - will start in tmux pane"
 else
@@ -593,13 +593,13 @@ else
 fi
 
 # Step 8: Set up tunnel interface
-echo "Setting up tunnel interface..."
+echo "[8/15] Setting up tunnel interface..."
 run_cmd ip tuntap add mode tun dev $TUN_INTERFACE 2>/dev/null || true
 run_cmd ip addr add $TUN_IP/$TUN_CIDR dev $TUN_INTERFACE
 run_cmd ip link set dev $TUN_INTERFACE up
 
 # Step 9: Set up routes
-echo "Setting up routes..."
+echo "[9/15] Setting up routes..."
 if [ -f "./add_routes.sh" ] && [ -f "routes.txt" ]; then
     run_cmd chmod +x ./add_routes.sh
     echo "Running: ./add_routes.sh routes.txt $TUN_INTERFACE $TUN_IP"
@@ -609,7 +609,7 @@ else
 fi
 
 # Step 10: Set up iptables for NAT
-echo "Setting up iptables NAT rules..."
+echo "[10/15] Setting up iptables NAT rules..."
 
 # Internet NAT
 run_cmd /usr/sbin/iptables -t nat -A POSTROUTING -o $INTERNET_INTERFACE -j MASQUERADE
@@ -672,6 +672,7 @@ fi
 
 # Add 5th pane for CLDAP (split bottom-right pane vertically)
 run_cmd tmux split-window -v -t lofl:0.3
+sleep 2
 
 # Pane 4 (bottom-center): CLDAP proxy
 if [ -f "./cldaproxy.sh" ]; then
@@ -687,18 +688,6 @@ tmux send-keys -t lofl:0.2 C-l
 tmux send-keys -t lofl:0.3 C-l
 tmux send-keys -t lofl:0.4 C-l
 
-echo "tmux session 'lofl' created with 5 panes:"
-echo "  - Top-left: DNS over TCP proxy"
-echo "  - Bottom-left: Traffic capture"
-echo "  - Top-right: SSH SOCKS tunnel"
-echo "  - Bottom-right: tun2socks"
-echo "  - Bottom-center: CLDAP proxy"
-echo
-echo "To attach to the session: tmux attach-session -t lofl"
-echo "To detach from session: Ctrl+b, then d"
-echo "To kill session: tmux kill-session -t lofl"
-echo
-
 echo
 echo "=== Configuration Summary ==="
 echo "Internet Interface: $INTERNET_INTERFACE"
@@ -711,4 +700,12 @@ echo "DC IPs: ${DC_IPS[*]}"
 echo "Default DNS: $DEFAULT_DNS"
 echo "SSH: $SSH_USER@$SSH_SERVER"
 echo
-echo "All services are starting in tmux. Attach to monitor: tmux attach-session -t lofl"
+echo "tmux session 'lofl' created with 5 panes:"
+echo "  - Top-left: DNS over TCP proxy"
+echo "  - Bottom-left: Traffic capture"
+echo "  - Top-right: SSH SOCKS tunnel"
+echo "  - Bottom-right: tun2socks"
+echo "  - Bottom-center: CLDAP proxy"
+echo
+echo "To attach to the session: tmux attach-session -t lofl"
+echo "To kill session: tmux kill-session -t lofl"

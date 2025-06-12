@@ -1,11 +1,10 @@
 # Automatic LOFL script
 
-Setting up LOFL can be time consuming, so I created a script that can automate the process. Run as root:
-
+Created a script that can automate the LOFL setup process. Run as root:
 ```
 ./auto_setup.sh
 ```
-Tested on a barebones instalation of Debian.
+Works on Debian.
 
 # Living Off the Foreign Land
 Scripts to setup and run the Living Off the Foreign Land (LOFL) attacker infrastructure. Refer to the following article at the BITSADMIN Blog for details on how to use the scripts in this repository.
