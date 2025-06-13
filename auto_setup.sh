@@ -7,8 +7,261 @@ stty icanon echo 2>/dev/null || true
 # Configuration file path
 CONFIG_FILE="lofl_config.conf"
 
+# Function to detect the operating system
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS_ID="$ID"
+        OS_VERSION="$VERSION_ID"
+        OS_NAME="$NAME"
+    elif [ -f /etc/arch-release ]; then
+        OS_ID="arch"
+        OS_NAME="Arch Linux"
+    elif [ -f /etc/debian_version ]; then
+        OS_ID="debian"
+        OS_NAME="Debian"
+    else
+        OS_ID="unknown"
+        OS_NAME="Unknown"
+    fi
+    
+    echo "Detected OS: $OS_NAME ($OS_ID)"
+}
+
+# Function to get architecture for tun2socks
+get_architecture() {
+    local arch
+    if command -v dpkg >/dev/null 2>&1; then
+        arch=$(dpkg --print-architecture)
+    else
+        arch=$(uname -m)
+        case $arch in
+            x86_64) arch="amd64" ;;
+            aarch64) arch="arm64" ;;
+            armv7l) arch="armhf" ;;
+        esac
+    fi
+    echo "$arch"
+}
+
+# Function to install packages based on OS
+install_packages() {
+    local packages_debian="dnsmasq python3-dnslib tcpdump openssh-client iproute2 iptables net-tools tmux wget curl git build-essential procps netcat-openbsd unzip sshpass expect socat"
+    local packages_arch="dnsmasq python-dnslib tcpdump openssh iproute2 iptables net-tools tmux wget curl git base-devel procps-ng openbsd-netcat unzip sshpass expect socat bind"
+    
+    case "$OS_ID" in
+        ubuntu|debian)
+            echo "Installing packages using apt..."
+            run_cmd apt update
+            run_cmd apt install -y $packages_debian
+            ;;
+        arch|manjaro)
+            echo "Installing packages using pacman..."
+            run_cmd pacman -Sy --noconfirm
+            run_cmd pacman -S --noconfirm $packages_arch
+            ;;
+        *)
+            echo "Unsupported OS: $OS_NAME"
+            echo "This script only supports Ubuntu, Debian, and Arch Linux"
+            echo "Please install the following packages manually:"
+            echo "dnsmasq, python3-dnslib, tcpdump, openssh-client, iproute2, iptables,"
+            echo "net-tools, tmux, wget, curl, git, build-essential, procps, netcat, unzip, sshpass, expect, socat"
+            echo -n "Continue anyway? (Y/n): " >&2
+            read -r continue_unsupported
+            if [[ ! -z "$continue_unsupported" && ! "$continue_unsupported" =~ ^[Yy]$ ]]; then
+                echo "Exiting. Please install packages manually and run again."
+                exit 1
+            fi
+            ;;
+    esac
+}
+
+# Function to restart network service based on OS
+restart_network_service() {
+    case "$OS_ID" in
+        ubuntu)
+            echo "Restarting networking service..."
+            # Check if using netplan (Ubuntu 18.04+)
+            if [ -d "/etc/netplan" ] && [ "$(ls -A /etc/netplan 2>/dev/null)" ]; then
+                echo "Detected Netplan configuration, applying netplan..."
+                run_cmd netplan apply
+            else
+                # Fallback to traditional networking service
+                run_cmd systemctl restart networking
+            fi
+            ;;
+        debian)
+            echo "Restarting networking service..."
+            run_cmd systemctl restart networking
+            ;;
+        arch|manjaro)
+            echo "Restarting NetworkManager service..."
+            if systemctl is-active NetworkManager >/dev/null 2>&1; then
+                run_cmd systemctl restart NetworkManager
+            else
+                echo "NetworkManager not active, skipping network restart"
+                echo "You may need to restart network manually: sudo systemctl restart NetworkManager"
+            fi
+            ;;
+        *)
+            echo "Unknown OS, attempting to restart networking..."
+            run_cmd systemctl restart networking 2>/dev/null || echo "Failed to restart networking - please restart manually"
+            ;;
+    esac
+}
+
+# Function to restart dnsmasq service
+restart_dnsmasq_service() {
+    echo "Restarting dnsmasq service..."
+    run_cmd systemctl restart dnsmasq
+}
+
+# Function to configure network interfaces based on OS
+configure_network_interfaces() {
+    case "$OS_ID" in
+        ubuntu)
+            # Check if Ubuntu uses Netplan (18.04+)
+            if [ -d "/etc/netplan" ] && [ "$(ls -A /etc/netplan 2>/dev/null)" ]; then
+                echo "Configuring network interfaces using Netplan..."
+                # Backup existing netplan config
+                run_cmd cp -r /etc/netplan /etc/netplan.backup.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+                
+                # Create netplan configuration
+                cat > /etc/netplan/01-lofl-config.yaml << EOF
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    $INTERNET_INTERFACE:
+      dhcp4: true
+    $LAN_INTERFACE:
+      dhcp4: false
+      addresses:
+        - $LAN_IP/24
+EOF
+                echo "Netplan configuration created"
+            else
+                echo "Configuring network interfaces using /etc/network/interfaces..."
+                cp /etc/network/interfaces /etc/network/interfaces.backup.$(date +%Y%m%d_%H%M%S)
+                
+                cat > /etc/network/interfaces << EOF
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).            
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+auto $INTERNET_INTERFACE
+iface $INTERNET_INTERFACE inet dhcp
+
+auto $LAN_INTERFACE
+iface $LAN_INTERFACE inet static
+        address $LAN_IP
+        netmask $LAN_NETMASK
+EOF
+            fi
+            ;;
+        debian)
+            echo "Configuring network interfaces using /etc/network/interfaces..."
+            cp /etc/network/interfaces /etc/network/interfaces.backup.$(date +%Y%m%d_%H%M%S)
+            
+            cat > /etc/network/interfaces << EOF
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).            
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+auto $INTERNET_INTERFACE
+iface $INTERNET_INTERFACE inet dhcp
+
+auto $LAN_INTERFACE
+iface $LAN_INTERFACE inet static
+        address $LAN_IP
+        netmask $LAN_NETMASK
+EOF
+            ;;
+        arch|manjaro)
+            echo "Configuring network interfaces using NetworkManager..."
+            # For Arch, we'll use NetworkManager nmcli commands
+            # First, check if NetworkManager is available
+            if ! command -v nmcli >/dev/null 2>&1; then
+                echo "NetworkManager not found. Installing..."
+                run_cmd pacman -S --noconfirm networkmanager
+                run_cmd systemctl enable NetworkManager
+                run_cmd systemctl start NetworkManager
+                sleep 3  # Give NetworkManager time to start
+            fi
+            
+            # Configure LAN interface with static IP
+            echo "Setting up static IP on $LAN_INTERFACE..."
+            echo "nmcli connection delete \"$LAN_INTERFACE\" 2>/dev/null || true"
+            nmcli connection delete "$LAN_INTERFACE" 2>/dev/null || true
+            run_cmd nmcli connection add type ethernet con-name "$LAN_INTERFACE" ifname "$LAN_INTERFACE" ip4 "$LAN_IP/24"
+            run_cmd nmcli connection up "$LAN_INTERFACE"
+            
+            # Make sure Internet interface is managed by NetworkManager
+            run_cmd nmcli device set "$INTERNET_INTERFACE" managed yes
+            ;;
+        *)
+            echo "Unknown OS - trying Debian-style interface configuration..."
+            cp /etc/network/interfaces /etc/network/interfaces.backup.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+            
+            cat > /etc/network/interfaces << EOF
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).            
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+auto $INTERNET_INTERFACE
+iface $INTERNET_INTERFACE inet dhcp
+
+auto $LAN_INTERFACE
+iface $LAN_INTERFACE inet static
+        address $LAN_IP
+        netmask $LAN_NETMASK
+EOF
+            echo "Note: Network configuration may need manual adjustment for your OS"
+            ;;
+    esac
+}
+
+# Function to get iptables path
+get_iptables_cmd() {
+    if command -v iptables >/dev/null 2>&1; then
+        echo "iptables"
+    elif [ -x "/usr/sbin/iptables" ]; then
+        echo "/usr/sbin/iptables"
+    elif [ -x "/sbin/iptables" ]; then
+        echo "/sbin/iptables"
+    else
+        echo "iptables"  # fallback, might fail
+    fi
+}
+
+# Function to get sysctl path
+get_sysctl_cmd() {
+    if command -v sysctl >/dev/null 2>&1; then
+        echo "sysctl"
+    elif [ -x "/usr/sbin/sysctl" ]; then
+        echo "/usr/sbin/sysctl"
+    elif [ -x "/sbin/sysctl" ]; then
+        echo "/sbin/sysctl"
+    else
+        echo "sysctl"  # fallback, might fail
+    fi
+}
+
 echo "========================================================"
-echo "    LOFL Linux SOCKS Routing Automation Script v1.0"
+echo "    LOFL Linux SOCKS Routing Automation Script v1.1"
+echo "    Supports: Debian, Arch Linux"
 echo "========================================================"
 echo
 
@@ -129,38 +382,21 @@ if [ -f "$CONFIG_FILE" ]; then
     fi
 fi
 
+# Always detect operating system (needed for network configuration)
+detect_os
+
 # Skip tool installation if using existing configuration
 if [ "$USE_EXISTING_CONFIG" = false ]; then
     echo "=== Installing Required Tools ==="
-    echo "Updating package lists..."
-    run_cmd apt update
-
-    echo "Installing all required packages..."
-    run_cmd apt install -y \
-        dnsmasq \
-        python3-dnslib \
-        tcpdump \
-        openssh-client \
-        iproute2 \
-        iptables \
-        net-tools \
-        tmux \
-        wget \
-        curl \
-        git \
-        build-essential \
-        procps \
-        netcat-openbsd \
-        unzip \
-        sshpass \
-        expect \
-        socat
+    
+    # Install packages based on OS
+    install_packages
 
     echo "Checking for tun2socks..."
     if ! command -v tun2socks &> /dev/null; then
         echo "Installing tun2socks..."
         # Download and install tun2socks
-        ARCH=$(dpkg --print-architecture)
+        ARCH=$(get_architecture)
         case $ARCH in
             amd64)
                 TUN2SOCKS_ARCH="linux-amd64"
@@ -512,34 +748,16 @@ echo
 echo "=== Starting Setup ==="
 
 # Step 1: Configure network interfaces
-echo "[1/17] Configuring network interfaces..."
-cp /etc/network/interfaces /etc/network/interfaces.backup.$(date +%Y%m%d_%H%M%S)
-
-cat > /etc/network/interfaces << EOF
-# This file describes the network interfaces available on your system
-# and how to activate them. For more information, see interfaces(5).            
-source /etc/network/interfaces.d/*
-
-# The loopback network interface
-auto lo
-iface lo inet loopback
-
-auto $INTERNET_INTERFACE
-iface $INTERNET_INTERFACE inet dhcp
-
-auto $LAN_INTERFACE
-iface $LAN_INTERFACE inet static
-        address $LAN_IP
-        netmask $LAN_NETMASK
-EOF
+echo "Configuring network interfaces..."
+configure_network_interfaces
 
 # Step 2: Restart networking
-echo "[2/17] Restarting networking..."
-run_cmd systemctl restart networking
+echo "Restarting networking..."
+restart_network_service
 run_cmd sleep 2
 
 # Step 3: Configure dnsmasq
-echo "[3/17] Configuring dnsmasq..."
+echo "Configuring dnsmasq..."
 run_cmd cp /etc/dnsmasq.conf /etc/dnsmasq.conf.backup.$(date +%Y%m%d_%H%M%S)
 
 cat > /etc/dnsmasq.conf << EOF
@@ -569,11 +787,11 @@ log-facility=/var/log/dnsmasq.log
 EOF
 
 # Step 4: Restart dnsmasq
-echo "[4/15] Restarting dnsmasq..."
-run_cmd systemctl restart dnsmasq
+echo "Restarting dnsmasq..."
+restart_dnsmasq_service
 
 # Step 5: Set nameserver and lock resolv.conf
-echo "[5/15] Configuring local DNS resolution..."
+echo "Configuring local DNS resolution..."
 run_cmd cp /etc/resolv.conf /etc/resolv.conf.backup.$(date +%Y%m%d_%H%M%S)
 run_cmd chattr -i /etc/resolv.conf 2>/dev/null || true
 echo "Running: echo 'nameserver 127.0.0.1' > /etc/resolv.conf"
@@ -581,11 +799,14 @@ echo "nameserver 127.0.0.1" > /etc/resolv.conf
 run_cmd chattr +i /etc/resolv.conf
 
 # Step 6: Configure IP forwarding
-echo "[6/15] Enabling IP forwarding..."
+echo "Enabling IP forwarding..."
 run_cmd echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+echo "Applying IP forwarding setting immediately..."
+SYSCTL_CMD=$(get_sysctl_cmd)
+run_cmd $SYSCTL_CMD -w net.ipv4.ip_forward=1
 
 # Step 7: Prepare for DNS over TCP proxy (will start in tmux)
-echo "[7/15] Preparing DNS over TCP proxy..."
+echo "Preparing DNS over TCP proxy..."
 if [ -f "./dns_over_tcp.py" ]; then
     echo "DNS over TCP script found - will start in tmux pane"
 else
@@ -593,13 +814,13 @@ else
 fi
 
 # Step 8: Set up tunnel interface
-echo "[8/15] Setting up tunnel interface..."
+echo "Setting up tunnel interface..."
 run_cmd ip tuntap add mode tun dev $TUN_INTERFACE 2>/dev/null || true
 run_cmd ip addr add $TUN_IP/$TUN_CIDR dev $TUN_INTERFACE
 run_cmd ip link set dev $TUN_INTERFACE up
 
 # Step 9: Set up routes
-echo "[9/15] Setting up routes..."
+echo "Setting up routes..."
 if [ -f "./add_routes.sh" ] && [ -f "routes.txt" ]; then
     run_cmd chmod +x ./add_routes.sh
     echo "Running: ./add_routes.sh routes.txt $TUN_INTERFACE $TUN_IP"
@@ -609,17 +830,20 @@ else
 fi
 
 # Step 10: Set up iptables for NAT
-echo "[10/15] Setting up iptables NAT rules..."
+echo "Setting up iptables NAT rules..."
+
+# Get iptables command path
+IPTABLES_CMD=$(get_iptables_cmd)
 
 # Internet NAT
-run_cmd /usr/sbin/iptables -t nat -A POSTROUTING -o $INTERNET_INTERFACE -j MASQUERADE
-run_cmd /usr/sbin/iptables -A FORWARD -i $INTERNET_INTERFACE -o $LAN_INTERFACE -m state --state RELATED,ESTABLISHED -j ACCEPT
-run_cmd /usr/sbin/iptables -A FORWARD -i $LAN_INTERFACE -o $INTERNET_INTERFACE -j ACCEPT
+run_cmd $IPTABLES_CMD -t nat -A POSTROUTING -o $INTERNET_INTERFACE -j MASQUERADE
+run_cmd $IPTABLES_CMD -A FORWARD -i $INTERNET_INTERFACE -o $LAN_INTERFACE -m state --state RELATED,ESTABLISHED -j ACCEPT
+run_cmd $IPTABLES_CMD -A FORWARD -i $LAN_INTERFACE -o $INTERNET_INTERFACE -j ACCEPT
 
 # Target network NAT
-run_cmd /usr/sbin/iptables -t nat -A POSTROUTING -o $TUN_INTERFACE -j MASQUERADE
-run_cmd /usr/sbin/iptables -A FORWARD -i $TUN_INTERFACE -o $LAN_INTERFACE -m state --state RELATED,ESTABLISHED -j ACCEPT
-run_cmd /usr/sbin/iptables -A FORWARD -i $LAN_INTERFACE -o $TUN_INTERFACE -j ACCEPT
+run_cmd $IPTABLES_CMD -t nat -A POSTROUTING -o $TUN_INTERFACE -j MASQUERADE
+run_cmd $IPTABLES_CMD -A FORWARD -i $TUN_INTERFACE -o $LAN_INTERFACE -m state --state RELATED,ESTABLISHED -j ACCEPT
+run_cmd $IPTABLES_CMD -A FORWARD -i $LAN_INTERFACE -o $TUN_INTERFACE -j ACCEPT
 
 echo
 echo "=== Setup Complete ==="
@@ -709,3 +933,4 @@ echo "  - Bottom-center: CLDAP proxy"
 echo
 echo "To attach to the session: tmux attach-session -t lofl"
 echo "To kill session: tmux kill-session -t lofl"
+
