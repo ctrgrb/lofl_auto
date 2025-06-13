@@ -62,7 +62,7 @@ install_packages() {
             ;;
         *)
             echo "Unsupported OS: $OS_NAME"
-            echo "This script only supports Ubuntu, Debian, and Arch Linux"
+            echo "This script only supports Debian, and Arch Linux"
             echo "Please install the following packages manually:"
             echo "dnsmasq, python3-dnslib, tcpdump, openssh-client, iproute2, iptables,"
             echo "net-tools, tmux, wget, curl, git, build-essential, procps, netcat, unzip, sshpass, expect, socat"
